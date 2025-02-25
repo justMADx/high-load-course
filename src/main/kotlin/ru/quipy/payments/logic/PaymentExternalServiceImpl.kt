@@ -12,6 +12,7 @@ import ru.quipy.payments.api.PaymentAggregate
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.*
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 
 
@@ -38,9 +39,11 @@ class PaymentExternalSystemAdapterImpl(
     private val rateLimiterBucket = TokenBucketRateLimiter(
         rateLimitPerSec,
         window = 1000,
-        bucketMaxCapacity = 11,
+        bucketMaxCapacity = rateLimitPerSec,
         timeUnit = TimeUnit.MILLISECONDS
     )
+
+    private val semaphore = Semaphore(parallelRequests)
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -54,6 +57,7 @@ class PaymentExternalSystemAdapterImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
+        semaphore.acquire()
         while(!rateLimiterBucket.tick()){
             Thread.sleep(10)
         }
@@ -98,6 +102,7 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
         }
+        semaphore.release()
     }
 
     override fun price() = properties.price
