@@ -2,10 +2,8 @@ package ru.quipy.payments.logic
 
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import liquibase.pro.packaged.it
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody
+import okhttp3.*
+import org.HdrHistogram.Histogram
 import org.slf4j.LoggerFactory
 import ru.quipy.common.utils.TokenBucketRateLimiter
 import ru.quipy.core.EventSourcingService
@@ -17,6 +15,21 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
+
+class DynamicTimeoutInterceptor(private val getTimeout: () -> Long) : Interceptor {
+    override fun intercept(chain: Interceptor.Chain): Response {
+        val timeout = getTimeout().toInt()
+
+        logger.warn("NEW TIMEOUT IS ${timeout}")
+        val newChain = chain
+            .withConnectTimeout(timeout, TimeUnit.MILLISECONDS)
+            .withReadTimeout(timeout, TimeUnit.MILLISECONDS)
+            .withWriteTimeout(timeout, TimeUnit.MILLISECONDS)
+
+        return newChain.proceed(chain.request())
+    }
+}
 
 // Advice: always treat time as a Duration
 class PaymentExternalSystemAdapterImpl(
@@ -25,7 +38,6 @@ class PaymentExternalSystemAdapterImpl(
 ) : PaymentExternalSystemAdapter {
 
     companion object {
-        val logger = LoggerFactory.getLogger(PaymentExternalSystemAdapter::class.java)
         val emptyBody = RequestBody.create(null, ByteArray(0))
         val mapper = ObjectMapper().registerKotlinModule()
     }
@@ -37,7 +49,13 @@ class PaymentExternalSystemAdapterImpl(
     private val parallelRequests = properties.parallelRequests
     private val retryCount = 3
 
-    private val client = OkHttpClient.Builder().build()
+    private var currentTimeout90thPercentile: Duration = Duration.ofMillis(requestAverageProcessingTime.toMillis() * 2)
+    private var highestTrackableValue = requestAverageProcessingTime.toMillis() * 2
+    private val histogram =
+        Histogram(requestAverageProcessingTime.toMillis(), highestTrackableValue, 2)
+
+    private val client =
+        OkHttpClient.Builder().addInterceptor(DynamicTimeoutInterceptor { currentTimeout90thPercentile.toMillis() }).build()
     private val rateLimiterBucket = TokenBucketRateLimiter(
         rateLimitPerSec,
         window = requestAverageProcessingTime.toMillis(),
@@ -45,10 +63,10 @@ class PaymentExternalSystemAdapterImpl(
         timeUnit = TimeUnit.MILLISECONDS
     )
 
-    private val semaphore = Semaphore(parallelRequests - 1)
+    private val semaphore = Semaphore(parallelRequests)
 
-    val baseDelay = 500L // Начальная задержка в миллисекундах
-    val maxDelay = 1000L // Максимальная задержка 10 секунд
+    val baseDelay = 200L // Начальная задержка в миллисекундах
+    val maxDelay = 1000L // Максимальная задержка 1 секунд
 
     override fun performPaymentAsync(paymentId: UUID, amount: Int, paymentStartedAt: Long, deadline: Long) {
         logger.warn("[$accountName] Submitting payment request for payment $paymentId")
@@ -62,11 +80,13 @@ class PaymentExternalSystemAdapterImpl(
             it.logSubmission(success = true, transactionId, now(), Duration.ofMillis(now() - paymentStartedAt))
         }
 
+        val url = "http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&" +
+                "transactionId=$transactionId&paymentId=$paymentId&amount=$amount&timeout=${currentTimeout90thPercentile}"
         val request = Request.Builder().run {
-            url("http://localhost:1234/external/process?serviceName=${serviceName}&accountName=${accountName}&transactionId=$transactionId&paymentId=$paymentId&amount=$amount")
+            url(url)
             post(emptyBody)
         }.build()
-
+        val startTime = System.currentTimeMillis()
         try {
             semaphore.acquire()
 
@@ -76,7 +96,7 @@ class PaymentExternalSystemAdapterImpl(
             val attempt = AtomicInteger(1)
             var isSuccess = false
             while (attempt.incrementAndGet() <= retryCount) {
-                if (now() + requestAverageProcessingTime.toMillis() > deadline) {
+                if (now() + currentTimeout90thPercentile.toMillis() > deadline) {
                     logger.error("[$accountName] Deadline exceeded, payment $paymentId aborted.")
                     break
                 }
@@ -166,6 +186,11 @@ class PaymentExternalSystemAdapterImpl(
                 }
             }
         } finally {
+            val duration = System.currentTimeMillis() - startTime
+            histogram.recordValue(duration)
+
+            currentTimeout90thPercentile = Duration.ofMillis(histogram.getValueAtPercentile(90.0))
+            logger.info("[$accountName] Updated 90th percentile timeout: $currentTimeout90thPercentile ms")
             semaphore.release()
         }
     }
