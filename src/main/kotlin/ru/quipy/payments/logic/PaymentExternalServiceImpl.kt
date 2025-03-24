@@ -147,7 +147,7 @@ class PaymentExternalSystemAdapterImpl(
                             }
                         }
 
-                        400, 401, 403, 404, 405 -> {
+                        400, 401, 403, 404, 405, 408 -> {
                             logger.error("[$accountName] Error ${response.code}. Aborted")
                             return // Прекращаем ретраи
                         }
@@ -189,7 +189,9 @@ class PaymentExternalSystemAdapterImpl(
             val duration = System.currentTimeMillis() - startTime
             histogram.recordValue(duration)
 
-            currentTimeout90thPercentile = Duration.ofMillis(histogram.getValueAtPercentile(90.0))
+            currentTimeout90thPercentile = Duration.ofMillis(
+                minOf(histogram.getValueAtPercentile(90.0), highestTrackableValue)
+            )
             logger.info("[$accountName] Updated 90th percentile timeout: $currentTimeout90thPercentile ms")
             semaphore.release()
         }
