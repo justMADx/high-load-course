@@ -3,10 +3,9 @@ package ru.quipy.payments.config
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.registerKotlinModule
-import org.eclipse.jetty.http2.server.HTTP2CServerConnectionFactory
+import org.apache.coyote.http2.Http2Protocol
+import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
-import org.springframework.boot.web.embedded.jetty.JettyServerCustomizer
-import org.springframework.boot.web.embedded.jetty.JettyServletWebServerFactory
 import org.springframework.boot.web.embedded.tomcat.TomcatConnectorCustomizer
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -23,6 +22,8 @@ import java.util.*
 @Configuration
 class PaymentAccountsConfig {
     companion object {
+        val logger = LoggerFactory.getLogger(PaymentAccountsConfig::class.java)
+
         private val javaClient = HttpClient.newBuilder().build()
         private val mapper = ObjectMapper().registerKotlinModule().registerModules(JavaTimeModule())
     }
@@ -50,5 +51,17 @@ class PaymentAccountsConfig {
                 it.accountName in allowedAccounts
             }.onEach(::println)
             .map { PaymentExternalSystemAdapterImpl(it, paymentService) }
+    }
+
+    @Bean
+    fun tomcatConnectorCustomizer(): TomcatConnectorCustomizer {
+        return TomcatConnectorCustomizer {
+            try {
+                (it.protocolHandler.findUpgradeProtocols().get(0) as Http2Protocol)
+                    .maxConcurrentStreams = 10_000_000
+            } catch (e: Exception) {
+                logger.error("!!! Failed to increase number of http2 streams per connection !!!")
+            }
+        }
     }
 }
