@@ -26,8 +26,6 @@ class PaymentTransactionsSubscriber {
     }
 
     val logger: Logger = LoggerFactory.getLogger(PaymentTransactionsSubscriber::class.java)
-
-    // Оптимизированное хранилище
     private val paymentLog: ConcurrentHashMap<UUID, ConcurrentLinkedQueue<PaymentLogRecord>> = ConcurrentHashMap()
     private val batchQueue = LinkedBlockingQueue<PaymentLogRecord>()
     private var isRunning = true
@@ -117,7 +115,6 @@ class PaymentTransactionsSubscriber {
         isRunning = false
     }
 
-    // Остальной код класса...
     class PaymentLogRecord(
         val timestamp: Long,
         val status: PaymentStatus,
